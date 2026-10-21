@@ -7,50 +7,46 @@
 
   outputs = { self, nixpkgs }:
     let
-      system = "aarch64-darwin"; # Adjust to your development machine architecture
+      system = "aarch64-darwin"; # Set to "aarch64-linux" on linux
       pkgs = import nixpkgs { inherit system; };
     in {
-      packages.${system}.default = let
-        # 1. Compile the Rust source code into a raw WebAssembly asset
-        raw-wasm = pkgs.rustPlatform.buildRustPackage {
-          pname = "frontend-raw-wasm";
-          version = "0.1.0";
-          src = ./.;
-
-          cargoLock.lockFile = ./Cargo.lock;
-          auditable = false; 
-
-          # Build flag manual override (Prevents Nix directory redirection bugs)
-          cargoBuildFlags = [ "--target" "wasm32-unknown-unknown" ];
-          doCheck = false;
-
-          # Provide LLVM environment variables for linking WASM objects
-          depsBuildBuild = [ pkgs.buildPackages.stdenv.cc pkgs.lld ];
-          env.RUSTFLAGS = "-C linker=wasm-ld";
-
-          # Robust installPhase using a wildcard lookup
-          installPhase = ''
-            mkdir -p $out/lib
-            # Find the binary wherever Cargo put it and copy it out safely
-            find target -name "frontend.wasm" -exec cp {} $out/lib/ \;
-          '';
-        };
-
-
-      in pkgs.stdenv.mkDerivation {
-        # 2. Extract index.html and generate JS glue logic for production deployment
-        name = "github-pages-static-assets";
+      packages.${system}.default = pkgs.rustPlatform.buildRustPackage {
+        pname = "github-pages-static-assets";
+        version = "0.1.0";
         src = ./.;
-        nativeBuildInputs = [ pkgs.wasm-bindgen-cli ];
 
+        cargoLock.lockFile = ./Cargo.lock;
+        auditable = false; 
+        doCheck = false;
+
+        # Add the LLVM tools and bindgen requirements explicitly
+        depsBuildBuild = [ pkgs.buildPackages.stdenv.cc pkgs.lld ];
+        nativeBuildInputs = [ pkgs.wasm-bindgen-cli ];
+        CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER = "wasm-ld";
+
+        # 1. FORCE Cargo to compile for WebAssembly by overriding the buildPhase
         buildPhase = ''
-          # Process the binary asset into web-readable js chunks
-          wasm-bindgen ${raw-wasm}/lib/frontend.wasm --target web --out-dir .
+          echo "Compiling Rust package targeting WebAssembly..."
+          cargo build --release --target=wasm32-unknown-unknown --offline
         '';
 
+        # 2. Extract and run bindgen in a predictable location
         installPhase = ''
           mkdir -p $out
-          cp frontend.js frontend_bg.wasm $out/
+
+          # Nix isolates target folders under standard release structures when buildPhase is manual
+          WASM_FILE=$(find target -name "frontend.wasm" -print -quit)
+
+          if [ -z "$WASM_FILE" ]; then
+            echo "Error: Could not locate frontend.wasm anywhere in the build tree!"
+            exit 1
+          fi
+
+          echo "Found binary at $WASM_FILE. Running bindgen..."
+          wasm-bindgen "$WASM_FILE" --target web --out-dir $out
+
+          # Copy your main HTML wrapper
+          cp index.html $out/
         '';
       };
     };
